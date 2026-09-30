@@ -38,6 +38,8 @@ use tokio::sync::{
     oneshot,
 };
 
+mod spaces;
+
 #[derive(Debug, Default)]
 struct Bounds {
     xmin: f64,
@@ -533,7 +535,7 @@ fn create_event_tap<'a>(
             res_events.iter().for_each(|e| {
                 // error must be ignored, since the event channel
                 // may already be closed when the InputCapture instance is dropped.
-                let _ = event_tx.blocking_send((pos, *e));
+                let _ = event_tx.blocking_send((pos, e.clone()));
             });
             // Returning Drop should stop the event from being processed
             // but core fundation still returns the event
@@ -581,6 +583,8 @@ fn event_tap_thread(
 ) {
     // Clone now: create_event_tap consumes notify_tx into its closure.
     let display_notify_tx = notify_tx.clone();
+    let gesture_state = client_state.clone();
+    let gesture_tx = event_tx.clone();
 
     let _tap = match create_event_tap(client_state, notify_tx, event_tx) {
         Err(e) => {
@@ -593,6 +597,8 @@ fn event_tap_thread(
             tap
         }
     };
+
+    let _spaces_tap = spaces::Tap::new(gesture_state, gesture_tx);
 
     // Register a Quartz display-reconfiguration callback so the
     // capture state's bounds get refreshed when the user plugs in a

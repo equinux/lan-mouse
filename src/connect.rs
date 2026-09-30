@@ -125,7 +125,7 @@ impl LanMouseConnection {
         event: ProtoEvent,
         handle: ClientHandle,
     ) -> Result<(), LanMouseConnectionError> {
-        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = event.into();
+        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = (&event).into();
         let buf = &buf[..len];
         if let Some(addr) = self.client_manager.active_addr(handle) {
             let conn = {
@@ -268,8 +268,8 @@ async fn receive_loop(
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
 ) {
     let mut buf = [0u8; MAX_EVENT_SIZE];
-    while conn.recv(&mut buf).await.is_ok() {
-        match buf.try_into() {
+    while let Ok(len) = conn.recv(&mut buf).await {
+        match (&buf[..len]).try_into() {
             Ok(event) => {
                 log::trace!("{addr} <==<==<== {event}");
                 match event {

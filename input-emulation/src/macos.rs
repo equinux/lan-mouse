@@ -24,11 +24,14 @@ use tokio::{sync::Notify, task::JoinHandle};
 
 use super::error::MacOSEmulationCreationError;
 
+mod spaces;
+
 const DEFAULT_REPEAT_DELAY: Duration = Duration::from_millis(500);
 const DEFAULT_REPEAT_INTERVAL: Duration = Duration::from_millis(32);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(crate) struct MacOSEmulation {
+    spaces: spaces::SpacesEmulation,
     /// global event source for all events
     event_source: CGEventSource,
     /// task handle for key repeats
@@ -66,6 +69,7 @@ impl MacOSEmulation {
         let event_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
             .map_err(|_| MacOSEmulationCreationError::EventSourceCreation)?;
         Ok(Self {
+            spaces: spaces::SpacesEmulation::default(),
             event_source,
             pressed_buttons: HashSet::new(),
             previous_button: None,
@@ -294,6 +298,8 @@ impl Emulation for MacOSEmulation {
     ) -> Result<(), EmulationError> {
         log::trace!("{event:?}");
         match event {
+            Event::DockSwipe(swipe) => self.spaces.consume(swipe, _handle),
+            Event::MacGesture(gesture) => self.spaces.consume_native(&gesture, _handle),
             Event::Pointer(pointer_event) => {
                 match pointer_event {
                     PointerEvent::Motion { time: _, dx, dy } => {
@@ -527,9 +533,13 @@ impl Emulation for MacOSEmulation {
 
     async fn create(&mut self, _handle: EmulationHandle) {}
 
-    async fn destroy(&mut self, _handle: EmulationHandle) {}
+    async fn destroy(&mut self, handle: EmulationHandle) {
+        self.spaces.cancel(Some(handle));
+    }
 
-    async fn terminate(&mut self) {}
+    async fn terminate(&mut self) {
+        self.spaces.cancel(None);
+    }
 }
 
 fn update_modifiers(modifiers: &Cell<XMods>, key: u32, state: u8) -> bool {

@@ -199,6 +199,7 @@ impl VirtualInput {
             .as_millis() as u32;
 
         match event {
+            input_event::Event::DockSwipe(_) | input_event::Event::MacGesture(_) => {}
             Event::Pointer(e) => {
                 match e {
                     PointerEvent::Motion { time, dx, dy } => self.pointer.motion(time, dx, dy),

@@ -61,6 +61,7 @@ impl Emulation for DesktopPortalEmulation {
         _client: EmulationHandle,
     ) -> Result<(), EmulationError> {
         match event {
+            input_event::Event::DockSwipe(_) | input_event::Event::MacGesture(_) => {}
             Pointer(p) => match p {
                 PointerEvent::Motion { time: _, dx, dy } => {
                     self.proxy

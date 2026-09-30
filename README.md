@@ -214,6 +214,70 @@ git config core.hooksPath .githooks
 The `pre-commit` script runs `cargo fmt --all` (and fails if files were modified), `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`.
 
 ### Dependencies & Compiling from Source
+
+#### macOS Magic Trackpad gesture development prototype
+
+An experimental Mac-to-Mac backend forwards horizontal Spaces switching,
+vertical Mission Control/App Exposé gestures, and Dock pinch/spread gestures
+for showing the desktop or opening the apps interface. It preserves continuous
+progress, reversal, and end/cancel phases. Capture reads macOS 27 Dock-swipe HID
+payloads; native Dock replay currently targets macOS 26 only.
+
+Application gestures use Apple's `CGEventCreateData`/`CGEventCreateFromData`
+network representation: pinch/zoom, rotation, Smart Zoom, navigation swipes,
+lookup and pressure events, and trackpad scrolling with its original phase and
+momentum metadata. The receiver validates the reconstructed AppKit type and
+uses its own cursor, timestamp, and process routing. Gesture frames are bounded
+to 4096 bytes, and older/reordered frames are ignored. Clicks, secondary clicks,
+and dragging continue through the existing pointer pipeline. Physical haptic
+feedback is not transmitted. Notification Center edge gestures and force-click
+behavior require verification with real input on both OS versions.
+
+The supported Dock direction is macOS 27 sending to macOS 26. Dock conversion
+uses undocumented macOS APIs and needs manual testing on both machines.
+Enable the gesture pipeline with `LAN_MOUSE_SPACES_SWIPE=1` on both peers.
+Other platforms ignore gesture frames. Protocol crate version 0.5 adds Dock
+motion types and native gesture frames; both Macs must run this build.
+
+For fast iteration, run from the repository root:
+
+```sh
+bash scripts/macos-dev.sh all
+# Default remote: szengel@handwerkerle-6; override with LAN_MOUSE_DEV_REMOTE.
+bash scripts/macos-dev.sh logs
+ssh szengel@handwerkerle-6 'tail -n 80 ~/lan-mouse-dev/stderr.log'
+```
+
+The script builds the daemon/CLI without GTK, bundles its dynamic libraries,
+deploys over SSH, and launches both development apps with trackpad gesture capture and
+debug logging enabled. It stops existing LAN Mouse processes gracefully and
+uses the existing configuration and certificates. The installed app remains
+available for rollback. Grant Accessibility to the local app at
+`target/macos-dev/Lan Mouse Dev.app` and the remote app at
+`~/lan-mouse-dev/Lan Mouse Dev.app`. The development bundle has its own identifier
+and is signed with an Apple Development certificate. The script caches the
+selected signing identity; override it with `LAN_MOUSE_DEV_SIGNING_IDENTITY`.
+Keep the same identity across rebuilds so privacy grants continue to match.
+Ad-hoc signing is unreliable for TCC during development.
+On macOS 27 the permission pane is named Device Control and Data Access.
+Use `bash scripts/macos-dev.sh permissions` for one explicit local permission
+request for Accessibility, event control, or input monitoring, in that order.
+Ordinary launches perform silent checks and log all three permission results.
+After granting access, restart with
+`bash scripts/macos-dev.sh start` without rebuilding.
+
+Manual validation: move the pointer onto the remote Mac and test horizontal
+Spaces switching, swipe up/down, and thumb/three-finger pinch/spread. Pause,
+reverse, and release both before and after each transition's commit threshold.
+In Safari/Preview, test pinch, rotation where supported, Smart Zoom, page swipes,
+and momentum scrolling; also test lookup, force click, and edge gestures.
+The local Space should stay unchanged. Test both directions, full-screen apps,
+the first/last Space, and disconnect during a gesture. Missing begin events can
+be recovered from cumulative progress; reordered samples are ignored, and an
+unfinished Dock gesture is cancelled after ten seconds without updates. Native
+application gestures preserve original events but have no lost-end recovery. Current
+macOS 26 replay uses private event fields and does not support receiving on 27.
+
 <details>
     <summary>MacOS</summary>
 

@@ -45,9 +45,116 @@ fn main() {
     let env = Env::default().filter_or("LAN_MOUSE_LOG_LEVEL", "info");
     env_logger::init_from_env(env);
 
+    #[cfg(target_os = "macos")]
+    if std::env::var("LAN_MOUSE_DEV_APP").as_deref() == Ok("1") {
+        initialize_dev_app();
+        check_dev_permissions();
+    }
+
     if let Err(e) = run() {
         log::error!("{e}");
         process::exit(1);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn initialize_dev_app() {
+    use std::ffi::c_void;
+    type Ref = *mut c_void;
+    #[link(name = "AppKit", kind = "framework")]
+    extern "C" {
+        fn NSApplicationLoad() -> bool;
+    }
+    #[link(name = "objc")]
+    extern "C" {
+        fn objc_getClass(name: *const std::ffi::c_char) -> Ref;
+        fn sel_registerName(name: *const std::ffi::c_char) -> Ref;
+        fn objc_msgSend(receiver: Ref, selector: Ref) -> Ref;
+    }
+    // Register the headless development bundle as an AppKit application before
+    // querying TCC. Production GTK builds already initialize AppKit themselves.
+    unsafe {
+        if NSApplicationLoad() {
+            let class = objc_getClass(c"NSApplication".as_ptr());
+            let app = objc_msgSend(class, sel_registerName(c"sharedApplication".as_ptr()));
+            let send_void: unsafe extern "C" fn(Ref, Ref) =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Ref, Ref) -> Ref);
+            send_void(app, sel_registerName(c"finishLaunching".as_ptr()));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn check_dev_permissions() {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> std::ffi::c_uchar;
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightListenEventAccess() -> bool;
+        fn CGPreflightPostEventAccess() -> bool;
+        fn CGRequestListenEventAccess() -> bool;
+        fn CGRequestPostEventAccess() -> bool;
+    }
+    unsafe {
+        let accessibility = AXIsProcessTrusted() != 0;
+        let listen = CGPreflightListenEventAccess();
+        let post = CGPreflightPostEventAccess();
+        log::info!(
+            "Development permissions: accessibility={accessibility}, listen={listen}, post={post}"
+        );
+        if std::env::var("LAN_MOUSE_DEV_PERMISSIONS").as_deref() == Ok("1") {
+            // Explicit Accessibility prompting can be retriggered after a
+            // denial, whereas an event-access request may not show another alert.
+            // Request only one category per invocation to avoid stacked dialogs.
+            if !accessibility {
+                log::info!("Requesting development Accessibility permission once");
+                prompt_dev_accessibility();
+            } else if !post {
+                log::info!("Requesting development event-control permission once");
+                CGRequestPostEventAccess();
+            } else if !listen {
+                log::info!("Requesting development input-monitoring permission once");
+                CGRequestListenEventAccess();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn prompt_dev_accessibility() {
+    use std::ffi::{c_uchar, c_void};
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        static kAXTrustedCheckOptionPrompt: *const c_void;
+        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> c_uchar;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFBooleanTrue: *const c_void;
+        fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            count: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> *const c_void;
+        fn CFRelease(object: *const c_void);
+    }
+    // The key and value are immortal CF constants, so no retain callbacks are needed.
+    let options = CFDictionaryCreate(
+        std::ptr::null(),
+        &kAXTrustedCheckOptionPrompt,
+        &kCFBooleanTrue,
+        1,
+        std::ptr::null(),
+        std::ptr::null(),
+    );
+    if !options.is_null() {
+        AXIsProcessTrustedWithOptions(options);
+        CFRelease(options);
     }
 }
 

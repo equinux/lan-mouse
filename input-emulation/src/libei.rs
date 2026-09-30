@@ -177,6 +177,7 @@ impl Emulation for LibeiEmulation {
             }
         }
         match event {
+            input_event::Event::DockSwipe(_) | input_event::Event::MacGesture(_) => {}
             Event::Pointer(p) => match p {
                 PointerEvent::Motion { time: _, dx, dy } => {
                     let pointer_device = self.devices.pointer.read().unwrap();

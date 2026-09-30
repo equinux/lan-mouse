@@ -38,12 +38,69 @@ pub enum KeyboardEvent {
     },
 }
 
-#[derive(PartialEq, Debug, Clone, Copy)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum Event {
     /// pointer event (motion / button / axis)
     Pointer(PointerEvent),
     /// keyboard events (key / modifiers)
     Keyboard(KeyboardEvent),
+    /// Interactive macOS Dock gesture (Spaces, Mission Control, desktop, apps).
+    DockSwipe(DockSwipe),
+    /// Native macOS application gesture, including phased trackpad scrolling.
+    MacGesture(MacGesture),
+}
+
+/// Limit native Quartz event data to keep allocations and datagrams bounded.
+pub const MAX_MAC_GESTURE_SIZE: usize = 4096;
+
+#[derive(PartialEq, Clone)]
+pub struct MacGesture {
+    pub sequence: u32,
+    /// AppKit event type; the receiver verifies this against reconstructed data.
+    pub kind: u8,
+    pub data: Vec<u8>,
+}
+
+impl MacGesture {
+    pub fn is_valid(&self) -> bool {
+        matches!(self.kind, 18..=20 | 22 | 29..=34)
+            && !self.data.is_empty()
+            && self.data.len() <= MAX_MAC_GESTURE_SIZE
+    }
+}
+
+impl fmt::Debug for MacGesture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MacGesture")
+            .field("sequence", &self.sequence)
+            .field("kind", &self.kind)
+            .field("bytes", &self.data.len())
+            .finish()
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub mod macos_gesture;
+
+#[derive(PartialEq, Debug, Clone, Copy)]
+pub struct DockSwipe {
+    /// HID motion: horizontal=1, vertical=2, pinch/spread=3.
+    pub motion: u8,
+    pub serial: u32,
+    pub sequence: u32,
+    /// HID phases: began=1, changed=2, ended=4, cancelled=8.
+    pub phase: u8,
+    pub progress: f64,
+    pub velocity: f64,
+}
+
+impl DockSwipe {
+    pub fn is_valid(self) -> bool {
+        matches!(self.motion, 1..=3)
+            && matches!(self.phase, 1 | 2 | 4 | 8)
+            && self.progress.is_finite()
+            && self.velocity.is_finite()
+    }
 }
 
 impl Display for PointerEvent {
@@ -114,6 +171,8 @@ impl Display for Event {
         match self {
             Event::Pointer(p) => write!(f, "{p}"),
             Event::Keyboard(k) => write!(f, "{k}"),
+            Event::DockSwipe(s) => write!(f, "dock-swipe({s:?})"),
+            Event::MacGesture(g) => write!(f, "mac-gesture({g:?})"),
         }
     }
 }

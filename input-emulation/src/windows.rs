@@ -38,6 +38,7 @@ impl WindowsEmulation {
 impl Emulation for WindowsEmulation {
     async fn consume(&mut self, event: Event, _: EmulationHandle) -> Result<(), EmulationError> {
         match event {
+            input_event::Event::DockSwipe(_) | input_event::Event::MacGesture(_) => {}
             Event::Pointer(pointer_event) => match pointer_event {
                 PointerEvent::Motion { time: _, dx, dy } => {
                     rel_mouse(dx as i32, dy as i32);
