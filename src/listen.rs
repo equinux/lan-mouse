@@ -79,7 +79,9 @@ impl LanMouseListener {
             let connection_attempts = connection_attempts.clone();
             Some(Arc::new(
                 move |certs: &[Vec<u8>], _chains: &[CertificateDer<'static>]| {
-                    assert!(certs.len() == 1);
+                    if certs.len() != 1 {
+                        return Err(webrtc_dtls::Error::ErrVerifyDataMismatch);
+                    }
                     let fingerprints = certs
                         .iter()
                         .map(|c| crypto::generate_fingerprint(c))

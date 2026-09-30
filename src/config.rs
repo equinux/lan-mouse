@@ -62,6 +62,7 @@ fn default_path() -> Result<PathBuf, VarError> {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 struct ConfigToml {
+    clipboard: Option<crate::clipboard::ClipboardConfig>,
     capture_backend: Option<CaptureBackend>,
     emulation_backend: Option<EmulationBackend>,
     port: Option<u16>,
@@ -458,6 +459,13 @@ impl Config {
         &self.cert_path
     }
 
+    pub(crate) fn clipboard(&self) -> crate::clipboard::ClipboardConfig {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.clipboard.clone())
+            .unwrap_or_default()
+    }
+
     /// optional input-capture backend override
     pub fn capture_backend(&self) -> Option<CaptureBackend> {
         self.args
@@ -526,15 +534,21 @@ impl Config {
     pub fn read_from_disk(&mut self) -> Result<bool, io::Error> {
         log::info!("reading config from {:?}", self.config_path);
 
-        let current_config = fs::read_to_string(&self.config_path)?;
+        let current_config = match fs::read_to_string(&self.config_path) {
+            Ok(config) => config,
+            Err(e) => {
+                log::warn!("Clipboard disabled: cannot read configuration: {e}");
+                return Ok(self.disable_clipboard());
+            }
+        };
         let current_config = match current_config.parse::<DocumentMut>() {
             Ok(c) => c,
             Err(e) => {
                 log::warn!("{:?} {e}", self.config_path());
-                return Ok(false);
+                return Ok(self.disable_clipboard());
             }
         };
-        let mut changed = false;
+        let changed;
         match toml_edit::de::from_document::<ConfigToml>(current_config) {
             Ok(current_config) => {
                 changed = self
@@ -543,7 +557,10 @@ impl Config {
                     .is_none_or(|c| c != &current_config);
                 self.config_toml.replace(current_config);
             }
-            Err(e) => log::warn!("{:?} {e}", self.config_path()),
+            Err(e) => {
+                log::warn!("{:?} {e}", self.config_path());
+                changed = self.disable_clipboard();
+            }
         };
         if changed {
             log::info!("config changed");
@@ -551,6 +568,14 @@ impl Config {
             log::info!("config unchanged");
         }
         Ok(changed)
+    }
+
+    fn disable_clipboard(&mut self) -> bool {
+        // Invalid or missing configuration cannot preserve a previous grant.
+        self.config_toml
+            .as_mut()
+            .and_then(|c| c.clipboard.take())
+            .is_some()
     }
 
     pub fn write_back(&mut self) -> Result<(), io::Error> {

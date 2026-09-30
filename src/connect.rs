@@ -9,7 +9,7 @@ use std::{
     io,
     net::SocketAddr,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::Duration,
 };
 use thiserror::Error;
@@ -46,6 +46,7 @@ const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 async fn connect(
     addr: SocketAddr,
     cert: Certificate,
+    authorized_keys: Arc<RwLock<HashMap<String, String>>>,
 ) -> Result<(Arc<dyn Conn + Sync + Send>, SocketAddr), (SocketAddr, LanMouseConnectionError)> {
     log::info!("connecting to {addr} ...");
     let conn = Arc::new(
@@ -58,6 +59,20 @@ async fn connect(
         certificates: vec![cert],
         server_name: "ignored".to_owned(),
         insecure_skip_verify: true,
+        // Our self-signed identities use explicit fingerprint trust instead of
+        // public PKI. This callback is invoked even with skip-PKI enabled.
+        verify_peer_certificate: Some(Arc::new(move |certs, _| {
+            if certs.len() == 1
+                && authorized_keys
+                    .read()
+                    .map(|keys| keys.contains_key(&crate::crypto::generate_fingerprint(&certs[0])))
+                    .unwrap_or(false)
+            {
+                Ok(())
+            } else {
+                Err(webrtc_dtls::Error::ErrVerifyDataMismatch)
+            }
+        })),
         extended_master_secret: ExtendedMasterSecretType::Require,
         ..Default::default()
     };
@@ -74,10 +89,11 @@ async fn connect(
 async fn connect_any(
     addrs: &[SocketAddr],
     cert: Certificate,
+    authorized_keys: Arc<RwLock<HashMap<String, String>>>,
 ) -> Result<(Arc<dyn Conn + Send + Sync>, SocketAddr), LanMouseConnectionError> {
     let mut joinset = JoinSet::new();
     for &addr in addrs {
-        joinset.spawn_local(connect(addr, cert.clone()));
+        joinset.spawn_local(connect(addr, cert.clone(), authorized_keys.clone()));
     }
     loop {
         match joinset.join_next().await {
@@ -94,6 +110,7 @@ async fn connect_any(
 
 pub(crate) struct LanMouseConnection {
     cert: Certificate,
+    authorized_keys: Arc<RwLock<HashMap<String, String>>>,
     client_manager: ClientManager,
     conns: Rc<Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>>,
     connecting: Rc<Mutex<HashSet<ClientHandle>>>,
@@ -103,10 +120,15 @@ pub(crate) struct LanMouseConnection {
 }
 
 impl LanMouseConnection {
-    pub(crate) fn new(cert: Certificate, client_manager: ClientManager) -> Self {
+    pub(crate) fn new(
+        cert: Certificate,
+        client_manager: ClientManager,
+        authorized_keys: Arc<RwLock<HashMap<String, String>>>,
+    ) -> Self {
         let (recv_tx, recv_rx) = channel();
         Self {
             cert,
+            authorized_keys,
             client_manager,
             conns: Default::default(),
             connecting: Default::default(),
@@ -155,7 +177,7 @@ impl LanMouseConnection {
             // connect in the background
             spawn_local(connect_to_handle(
                 self.client_manager.clone(),
-                self.cert.clone(),
+                (self.cert.clone(), self.authorized_keys.clone()),
                 handle,
                 self.conns.clone(),
                 self.connecting.clone(),
@@ -169,7 +191,7 @@ impl LanMouseConnection {
 
 async fn connect_to_handle(
     client_manager: ClientManager,
-    cert: Certificate,
+    identity: (Certificate, Arc<RwLock<HashMap<String, String>>>),
     handle: ClientHandle,
     conns: Rc<Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>>,
     connecting: Rc<Mutex<HashSet<ClientHandle>>>,
@@ -185,7 +207,7 @@ async fn connect_to_handle(
             .map(|a| SocketAddr::new(a, port))
             .collect::<Vec<_>>();
         log::info!("client ({handle}) connecting ... (ips: {addrs:?})");
-        let res = connect_any(&addrs, cert).await;
+        let res = connect_any(&addrs, identity.0, identity.1).await;
         let (conn, addr) = match res {
             Ok(c) => c,
             Err(e) => {
@@ -307,4 +329,48 @@ async fn disconnect(
     client_manager.set_peer_commit(handle, None);
     let active: Vec<SocketAddr> = conns.lock().await.keys().copied().collect();
     log::info!("active connections: {active:?}");
+}
+
+#[cfg(test)]
+mod authentication_tests {
+    use super::*;
+    use webrtc_util::conn::Listener;
+
+    #[tokio::test]
+    async fn outgoing_dtls_rejects_unapproved_server_identity() {
+        let server = Certificate::generate_self_signed(["ignored".to_owned()]).unwrap();
+        let client = Certificate::generate_self_signed(["ignored".to_owned()]).unwrap();
+        for authorized in [true, false] {
+            let listener = webrtc_dtls::listener::listen(
+                "127.0.0.1:0",
+                Config {
+                    certificates: vec![server.clone()],
+                    extended_master_secret: ExtendedMasterSecretType::Require,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let addr = listener.addr().await.unwrap();
+            let keys = Arc::new(RwLock::new(HashMap::new()));
+            if authorized {
+                keys.write().unwrap().insert(
+                    crate::crypto::certificate_fingerprint(&server),
+                    String::new(),
+                );
+            }
+            let (connected, accepted) = tokio::join!(
+                connect(addr, client.clone(), keys),
+                tokio::time::timeout(Duration::from_secs(6), listener.accept())
+            );
+            assert_eq!(connected.is_ok(), authorized);
+            if let Ok((conn, _)) = connected {
+                let _ = conn.close().await;
+            }
+            if let Ok(Ok((conn, _))) = accepted {
+                let _ = conn.close().await;
+            }
+            listener.close().await.unwrap();
+        }
+    }
 }

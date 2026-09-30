@@ -1,6 +1,7 @@
 use crate::{
     capture::{Capture, CaptureType, ICaptureEvent},
     client::ClientManager,
+    clipboard::Clipboard,
     config::{Config, ConfigClient},
     connect::LanMouseConnection,
     crypto,
@@ -38,6 +39,7 @@ pub enum ServiceError {
 pub struct Service {
     /// configuration
     config: Config,
+    clipboard: Option<Clipboard>,
     /// input capture
     capture: Capture,
     /// input emulation
@@ -91,10 +93,16 @@ impl Service {
         let frontend_listener = AsyncFrontendListener::new().await?;
 
         let authorized_keys = Arc::new(RwLock::new(config.authorized_fingerprints()));
+        let clipboard =
+            Clipboard::start(config.clipboard(), cert.clone(), authorized_keys.clone()).await?;
         // listener + connection
         let listener =
             LanMouseListener::new(config.port(), cert.clone(), authorized_keys.clone()).await?;
-        let conn = LanMouseConnection::new(cert.clone(), client_manager.clone());
+        let conn = LanMouseConnection::new(
+            cert.clone(),
+            client_manager.clone(),
+            authorized_keys.clone(),
+        );
 
         // input capture + emulation
         let capture_backend = config.capture_backend().map(|b| b.into());
@@ -108,6 +116,7 @@ impl Service {
         let port = config.port();
         let service = Self {
             config,
+            clipboard,
             capture,
             emulation,
             frontend_listener,
@@ -147,12 +156,31 @@ impl Service {
                 event = self.emulation.event() => self.handle_emulation_event(event),
                 event = self.capture.event() => self.handle_capture_event(event),
                 event = self.resolver.event() => self.handle_resolver_event(event),
-                _ = self.config.changed() => self.handle_config_change(),
+                result = self.config.changed() => {
+                    self.handle_config_change();
+                    // Close the old session before applying changed pairing or
+                    // permissions. A reload never keeps an old authorization alive.
+                    if let Some(clipboard) = self.clipboard.take() { clipboard.stop().await; }
+                    if let Err(e) = result {
+                        log::error!("Clipboard disabled: configuration watcher failed: {e}");
+                        continue;
+                    }
+                    match crypto::load_certificate(self.config.cert_path()) {
+                        Ok(cert) => match Clipboard::start(self.config.clipboard(), cert, self.authorized_keys.clone()).await {
+                            Ok(clipboard) => self.clipboard = clipboard,
+                            Err(e) => log::error!("Clipboard disabled after configuration change: {e}"),
+                        },
+                        Err(e) => log::error!("Clipboard disabled: certificate reload failed: {e}"),
+                    }
+                },
                 r = signal::ctrl_c() => break r.expect("failed to wait for CTRL+C"),
             }
         }
 
         log::info!("terminating service ...");
+        if let Some(clipboard) = self.clipboard.take() {
+            clipboard.stop().await;
+        }
         log::debug!("terminating capture ...");
         self.capture.terminate().await;
         log::debug!("terminating emulation ...");
