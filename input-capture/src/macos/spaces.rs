@@ -45,6 +45,7 @@ struct Context {
     sequence: u32,
     active: bool,
     native_sequence: u32,
+    permissions: Arc<InputPermissionGate>,
 }
 
 pub(super) struct Tap {
@@ -56,7 +57,11 @@ impl Tap {
     pub(super) fn new(
         state: Arc<Mutex<InputCaptureState>>,
         tx: Sender<(Position, CaptureEvent)>,
+        permissions: Arc<InputPermissionGate>,
     ) -> Option<Self> {
+        if !permissions.enabled() {
+            return None;
+        }
         if std::env::var("LAN_MOUSE_SPACES_SWIPE").as_deref() != Ok("1") {
             return None;
         }
@@ -83,6 +88,7 @@ impl Tap {
             sequence: 0,
             active: false,
             native_sequence: 0,
+            permissions,
         });
         let port = unsafe {
             CGEventTapCreate(
@@ -99,6 +105,14 @@ impl Tap {
             return None;
         }
         context.port = port;
+        if !context.permissions.enabled() {
+            unsafe {
+                CGEventTapEnable(port, false);
+                CFMachPortInvalidate(port);
+                CFRelease(port.cast());
+            }
+            return None;
+        }
         let source = unsafe { CFMachPortCreateRunLoopSource(ptr::null_mut(), port, 0) };
         if source.is_null() {
             unsafe {
@@ -189,15 +203,24 @@ unsafe fn decode(event: Ref, copy: Option<CopyHid>) -> Option<DockSwipe> {
 
 unsafe extern "C" fn callback(_proxy: Ref, kind: u32, event: Ref, info: Ref) -> Ref {
     let context = &mut *info.cast::<Context>();
+    if !context.permissions.enabled() || kind == u32::MAX {
+        context.permissions.disable();
+        context.active = false;
+        CGEventTapEnable(context.port, false);
+        if let Ok(mut state) = context.state.try_lock() {
+            state.current_pos = None;
+        }
+        let _ = CGDisplay::show_cursor(&CGDisplay::main());
+        CFRunLoop::get_current().stop();
+        return event;
+    }
     if kind == u32::MAX - 1 {
         CGEventTapEnable(context.port, true);
         return event;
     }
-    if kind == u32::MAX {
-        context.active = false;
+    let Ok(state) = context.state.try_lock() else {
         return event;
-    }
-    let state = context.state.blocking_lock();
+    };
     let Some(position) = state.current_pos else {
         context.active = false;
         return event;
@@ -219,6 +242,7 @@ unsafe extern "C" fn callback(_proxy: Ref, kind: u32, event: Ref, info: Ref) -> 
                 .try_send((position, CaptureEvent::Input(Event::MacGesture(gesture))))
             {
                 log::warn!("Native trackpad gesture capture queue: {e}");
+                return event;
             }
             return ptr::null_mut();
         }
@@ -249,6 +273,8 @@ unsafe extern "C" fn callback(_proxy: Ref, kind: u32, event: Ref, info: Ref) -> 
         .try_send((position, CaptureEvent::Input(Event::DockSwipe(swipe))))
     {
         log::warn!("Dock gesture capture queue: {e}");
+        context.active = false;
+        return event;
     }
     if matches!(swipe.phase, 4 | 8) {
         context.active = false;

@@ -282,6 +282,38 @@ macOS 26 replay uses private event fields and does not support receiving on 27.
 <details>
     <summary>MacOS</summary>
 
+For a signed release app with the GTK interface, native trackpad gesture pipeline
+enabled on Finder launch, and opt-in secure text clipboard support:
+
+```sh
+brew install libadwaita pkg-config librsvg imagemagick
+SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+  bash scripts/macos-release.sh
+```
+
+The app, signed drag-to-Applications DMG, ZIP, and SHA-256 checksums are written
+to `target/macos-release`. The default minimum OS is macOS 26; set
+`MACOSX_DEPLOYMENT_TARGET` to change it. Packaging rejects libraries that require
+a newer OS. If current Homebrew bottles require a newer system, set
+`MACOS_RUNTIME_APP` to an existing compatible Lan Mouse app bundle to reuse its
+GTK libraries and runtime data while rebuilding the executable. This does not
+copy its configuration or credentials. Signing does not include notarization.
+
+Quit the development app before launching the installed app, and grant the
+installed app Accessibility access. Existing user configuration and paired
+clipboard settings are reused. Clipboard sharing stays disabled unless explicitly
+configured as described below; neither pairing credentials nor clipboard contents
+are included in the application bundle.
+
+Native input requires confirmed Accessibility, input-listening, and event-control
+access before capture or emulation starts. A launch that observes missing access
+keeps its daemon's native input disabled until relaunch. Revocation disables both
+capture taps, restores the local cursor, and prevents timeout recovery from
+reactivating interception. The callbacks pass local events through if permissions
+are missing or their state/queues are unavailable.
+
+For a local unsigned/debug bundle:
+
 ```sh
 # Install dependencies
 brew install libadwaita pkg-config imagemagick

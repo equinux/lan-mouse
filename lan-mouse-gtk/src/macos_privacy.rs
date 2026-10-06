@@ -26,8 +26,6 @@ extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     static kCFAllocatorDefault: *const c_void;
-    static kCFTypeDictionaryKeyCallBacks: *const c_void;
-    static kCFTypeDictionaryValueCallBacks: *const c_void;
     static kCFBooleanTrue: *const c_void;
     fn CFDictionaryCreate(
         allocator: *const c_void,
@@ -51,18 +49,9 @@ extern "C" {
     fn CGRequestListenEventAccess() -> c_uchar;
     fn CGRequestPostEventAccess() -> c_uchar;
 
-    // CFMachPortRef CGEventTapCreate(
-    //     CGEventTapLocation tap, CGEventTapPlacement place,
-    //     CGEventTapOptions options, CGEventMask eventsOfInterest,
-    //     CGEventTapCallBack callback, void *userInfo);
-    fn CGEventTapCreate(
-        tap: u32,
-        place: u32,
-        options: u32,
-        events_of_interest: u64,
-        callback: *const c_void,
-        user_info: *const c_void,
-    ) -> *const c_void;
+    fn CGPreflightListenEventAccess() -> bool;
+    fn CGPreflightPostEventAccess() -> bool;
+
 }
 
 pub fn accessibility_granted() -> bool {
@@ -145,50 +134,6 @@ pub fn relaunch_bundle() {
     let _ = Command::new("sh").arg("-c").arg(cmd).spawn();
 }
 
-/// Make sure the app appears in System Settings → Privacy → Input Monitoring.
-///
-/// `CGRequestListenEventAccess()` is *supposed* to register the app in the
-/// list (and prompt) on first call, but in practice — particularly after a
-/// `tccutil reset ListenEvent <bundle>` — it often silently no-ops and the
-/// app never gets added. The reliable way to force registration is to
-/// attempt a protected action: create a `CGEventTap`. If permission is
-/// missing the call returns null, but the attempt itself causes TCC to add
-/// the bundle to the Input Monitoring pane so the user can toggle it on.
-/// If permission already exists the tap is created successfully, and we
-/// tear it down immediately so it doesn't intercept events.
-unsafe fn ensure_listed_in_input_monitoring() {
-    let req = CGRequestListenEventAccess();
-    log::debug!("CGRequestListenEventAccess() = {req}");
-    let cb = input_monitoring_noop_tap_callback as *const c_void;
-    // Use kCGSessionEventTap (1), NOT kCGHIDEventTap (0). The HID tap sits
-    // below window-server input and requires Accessibility in addition to
-    // Input Monitoring, so attempting it when Accessibility isn't granted
-    // surfaces an Accessibility prompt as a side effect — which is confusing
-    // on top of the real Accessibility prompt we already fire explicitly.
-    // The session tap requires only Input Monitoring, so its failure is a
-    // clean "Input Monitoring missing" signal that TCC uses to list the
-    // bundle under the Input Monitoring pane.
-    // kCGHeadInsertEventTap = 0, kCGEventTapOptionListenOnly = 1,
-    // mask kCGEventKeyDown = 1 << 10.
-    let tap = CGEventTapCreate(1, 0, 1, 1 << 10, cb, std::ptr::null());
-    log::debug!("CGEventTapCreate(kCGSessionEventTap) -> {tap:?}");
-    if !tap.is_null() {
-        CFRelease(tap);
-    }
-}
-
-extern "C" fn input_monitoring_noop_tap_callback(
-    _proxy: *const c_void,
-    _ty: u32,
-    event: *const c_void,
-    _refcon: *const c_void,
-) -> *const c_void {
-    // Pass through unchanged. This tap is never added to a run loop, so
-    // in practice the callback never fires — it exists only so the tap
-    // can be created (and the attempt is what forces TCC registration).
-    event
-}
-
 fn open_url(url: &str) {
     if let Err(e) = Command::new("open").arg(url).spawn() {
         log::warn!("failed to open {url}: {e}");
@@ -229,28 +174,26 @@ fn fire_initial_prompts_inner() {
                 &key as *const _,
                 &value as *const _,
                 1,
-                kCFTypeDictionaryKeyCallBacks,
-                kCFTypeDictionaryValueCallBacks,
+                // These constants live for the process lifetime; no retain or
+                // release callbacks are needed for this temporary dictionary.
+                std::ptr::null(),
+                std::ptr::null(),
             );
-            AXIsProcessTrustedWithOptions(options);
-            CFRelease(options);
+            if !options.is_null() {
+                AXIsProcessTrustedWithOptions(options);
+                CFRelease(options);
+            }
         }
         return;
     }
-    // Accessibility is granted. Attempt Input Monitoring registration
-    // unconditionally — even if preflight returns true — so the bundle gets
-    // listed in System Settings under its own identity (otherwise launches
-    // from a parent process that already has Input Monitoring, e.g. Terminal,
-    // inherit the grant but the bundle is never listed for the user to
-    // toggle persistently).
-    log::info!("ensuring Lan Mouse is listed under Input Monitoring");
+    // Permission requests must never create a temporary tap. The daemon
+    // stays blocked until all preflight checks succeed on a fresh launch.
     unsafe {
-        ensure_listed_in_input_monitoring();
-    }
-    // Same for Post Event: now that Accessibility is present, this call is
-    // safe — it won't surface the generic Accessibility prompt.
-    log::info!("ensuring Lan Mouse is listed under Accessibility > Post Event");
-    unsafe {
-        CGRequestPostEventAccess();
+        if !CGPreflightListenEventAccess() {
+            CGRequestListenEventAccess();
+        }
+        if !CGPreflightPostEventAccess() {
+            CGRequestPostEventAccess();
+        }
     }
 }

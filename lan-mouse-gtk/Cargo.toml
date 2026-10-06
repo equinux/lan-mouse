@@ -7,6 +7,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/feschber/lan-mouse"
 
 [dependencies]
+input-event = { path = "../input-event", version = "0.4.0", default-features = false }
 gtk = { package = "gtk4", version = "0.9.0", features = ["v4_2"] }
 adw = { package = "libadwaita", version = "0.7.0", features = ["v1_1"] }
 async-channel = { version = "2.1.1" }

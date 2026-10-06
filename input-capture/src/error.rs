@@ -144,6 +144,8 @@ pub enum X11InputCaptureCreationError {
 #[cfg(target_os = "macos")]
 #[derive(Debug, Error)]
 pub enum MacosCaptureCreationError {
+    #[error("native input disabled: grant Accessibility and input access, then relaunch")]
+    PermissionsIncomplete,
     #[error("event source creation failed!")]
     EventSourceCreation,
     #[cfg(target_os = "macos")]

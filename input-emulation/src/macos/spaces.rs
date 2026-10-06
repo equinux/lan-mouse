@@ -149,6 +149,9 @@ impl Drop for SpacesEmulation {
 }
 
 fn post(swipe: DockSwipe) {
+    if !Permissions::input_allowed() {
+        return;
+    }
     // Vertical swipes retain the HID sign; horizontal swipes and pinches use
     // the opposite sign in legacy Dock events. Release must follow the drag.
     let direction = if swipe.motion == 2 { 1.0 } else { -1.0 };

@@ -25,12 +25,14 @@ use tokio::{sync::Notify, task::JoinHandle};
 use super::error::MacOSEmulationCreationError;
 
 mod spaces;
+use input_event::macos_permissions::{InputPermissionGate, Permissions};
 
 const DEFAULT_REPEAT_DELAY: Duration = Duration::from_millis(500);
 const DEFAULT_REPEAT_INTERVAL: Duration = Duration::from_millis(32);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(crate) struct MacOSEmulation {
+    permissions: Arc<InputPermissionGate>,
     spaces: spaces::SpacesEmulation,
     /// global event source for all events
     event_source: CGEventSource,
@@ -69,6 +71,7 @@ impl MacOSEmulation {
         let event_source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
             .map_err(|_| MacOSEmulationCreationError::EventSourceCreation)?;
         Ok(Self {
+            permissions: Arc::new(InputPermissionGate::default()),
             spaces: spaces::SpacesEmulation::default(),
             event_source,
             pressed_buttons: HashSet::new(),
@@ -96,6 +99,7 @@ impl MacOSEmulation {
         let event_source = self.event_source.clone();
         let notify = self.notify_repeat_task.clone();
         let modifiers = self.modifier_state.clone();
+        let permissions = self.permissions.clone();
         let repeat_task = tokio::task::spawn_local(async move {
             let stop = tokio::select! {
                 _ = tokio::time::sleep(DEFAULT_REPEAT_DELAY) => false,
@@ -103,6 +107,9 @@ impl MacOSEmulation {
             };
             if !stop {
                 loop {
+                    if !permissions.enabled() {
+                        break;
+                    }
                     key_event(event_source.clone(), key, 1, modifiers.get());
                     tokio::select! {
                         _ = tokio::time::sleep(DEFAULT_REPEAT_INTERVAL) => {},
@@ -123,7 +130,9 @@ impl MacOSEmulation {
             // is owned by the main consume() loop, which already calls
             // update_modifiers with the correct Linux scancode on the real key
             // release event from the client.
-            key_event(event_source.clone(), key, 0, modifiers.get());
+            if permissions.enabled() {
+                key_event(event_source.clone(), key, 0, modifiers.get());
+            }
         });
         self.repeat_task = Some(repeat_task);
     }
@@ -137,39 +146,10 @@ impl MacOSEmulation {
 }
 
 fn request_macos_emulation_permissions() -> Result<(), MacOSEmulationCreationError> {
-    // Request both permissions up front so the user sees both TCC prompts
-    // on the first launch. See the matching comment in input-capture/src/
-    // macos.rs::request_macos_capture_permissions for the rationale.
-    let accessibility = request_accessibility_permission();
-    let input_control = request_input_control_permission();
-
-    if !accessibility {
-        return Err(MacOSEmulationCreationError::AccessibilityPermission);
-    }
-    if !input_control {
-        return Err(MacOSEmulationCreationError::InputControlPermission);
+    if !Permissions::input_allowed() {
+        return Err(MacOSEmulationCreationError::PermissionsIncomplete);
     }
     Ok(())
-}
-
-fn request_accessibility_permission() -> bool {
-    // Silent check. The GUI owns the one-time user-visible prompt at
-    // startup (see lan_mouse_gtk::macos_privacy).
-    unsafe { AXIsProcessTrusted() }
-}
-
-fn request_input_control_permission() -> bool {
-    unsafe { CGPreflightPostEventAccess() }
-}
-
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGPreflightPostEventAccess() -> bool;
-}
-
-#[link(name = "ApplicationServices", kind = "framework")]
-extern "C" {
-    fn AXIsProcessTrusted() -> bool;
 }
 
 /// Mac virtual key codes for the four arrow keys.
@@ -186,6 +166,9 @@ fn is_arrow_key(key: u16) -> bool {
 }
 
 fn key_event(event_source: CGEventSource, key: u16, state: u8, modifiers: XMods) {
+    if !Permissions::input_allowed() {
+        return;
+    }
     let event = match CGEvent::new_keyboard_event(event_source, key, state != 0) {
         Ok(e) => e,
         Err(_) => {
@@ -207,6 +190,9 @@ fn key_event(event_source: CGEventSource, key: u16, state: u8, modifiers: XMods)
 }
 
 fn modifier_event(event_source: CGEventSource, depressed: XMods) {
+    if !Permissions::input_allowed() {
+        return;
+    }
     let Ok(event) = CGEvent::new(event_source) else {
         log::warn!("could not create CGEvent");
         return;
@@ -296,6 +282,10 @@ impl Emulation for MacOSEmulation {
         event: Event,
         _handle: EmulationHandle,
     ) -> Result<(), EmulationError> {
+        if !self.permissions.enabled() {
+            self.cancel_repeat_task().await;
+            return Ok(());
+        }
         log::trace!("{event:?}");
         match event {
             Event::DockSwipe(swipe) => self.spaces.consume(swipe, _handle),
@@ -539,6 +529,8 @@ impl Emulation for MacOSEmulation {
 
     async fn terminate(&mut self) {
         self.spaces.cancel(None);
+        self.cancel_repeat_task().await;
+        self.permissions.disable();
     }
 }
 

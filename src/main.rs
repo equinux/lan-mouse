@@ -234,10 +234,14 @@ where
 }
 
 fn start_service() -> Result<Child, io::Error> {
-    let child = process::Command::new(std::env::current_exe()?)
-        .args(std::env::args().skip(1))
-        .arg("daemon")
-        .spawn()?;
+    let mut command = process::Command::new(std::env::current_exe()?);
+    command.args(std::env::args().skip(1)).arg("daemon");
+    #[cfg(target_os = "macos")]
+    if !input_event::macos_permissions::Permissions::input_allowed() {
+        log::info!("Native input disabled for this launch; grant permissions and relaunch");
+        command.env(input_event::macos_permissions::INPUT_DISABLED_ENV, "1");
+    }
+    let child = command.spawn()?;
     Ok(child)
 }
 

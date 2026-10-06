@@ -210,13 +210,15 @@ fn build_ui(app: &Application) {
         Ok(conn) => conn,
         Err(e) => {
             log::warn!("could not connect to daemon ({e}), spawning a new one");
-            if let Err(spawn_err) = process::Command::new(
+            let mut command = process::Command::new(
                 env::current_exe().expect("could not determine executable path"),
-            )
-            .args(env::args().skip(1))
-            .arg("daemon")
-            .spawn()
-            {
+            );
+            command.args(env::args().skip(1)).arg("daemon");
+            #[cfg(target_os = "macos")]
+            if !input_event::macos_permissions::Permissions::input_allowed() {
+                command.env(input_event::macos_permissions::INPUT_DISABLED_ENV, "1");
+            }
+            if let Err(spawn_err) = command.spawn() {
                 log::error!("failed to spawn daemon: {spawn_err}");
                 process::exit(1);
             }

@@ -3,6 +3,9 @@ use std::fmt::{self, Display};
 pub mod error;
 pub mod scancode;
 
+#[cfg(target_os = "macos")]
+pub mod macos_permissions;
+
 #[cfg(all(unix, feature = "libei", not(target_os = "macos")))]
 mod libei;
 
