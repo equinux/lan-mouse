@@ -305,6 +305,12 @@ clipboard settings are reused. Clipboard sharing stays disabled unless explicitl
 configured as described below; neither pairing credentials nor clipboard contents
 are included in the application bundle.
 
+An invalid clipboard configuration disables clipboard sharing and reports the
+error in the interface and logs; mouse and keyboard sharing can still start.
+The interface connects to the daemon in the background and shows an error if
+it cannot connect within five seconds. The IPC crate also provides
+`connect_timeout(Duration)` for callers that need a bounded startup wait.
+
 Native input requires confirmed Accessibility, input-listening, and event-control
 access before capture or emulation starts. A launch that observes missing access
 keeps its daemon's native input disabled until relaunch. Revocation disables both

@@ -10,7 +10,7 @@ mod macos_privacy;
 mod macos_status_item;
 mod window;
 
-use std::{env, process, str, sync::OnceLock};
+use std::{cell::Cell, env, process, rc::Rc, str, sync::OnceLock, time::Duration};
 
 use gtk::CssProvider;
 use window::Window;
@@ -91,7 +91,42 @@ fn gtk_main() -> glib::ExitCode {
         setup_actions(app);
         setup_menu(app);
     });
-    app.connect_activate(build_ui);
+    let connecting = Rc::new(Cell::new(false));
+    app.connect_activate(move |app| {
+        if let Some(window) = app.windows().first() {
+            window.present();
+            return;
+        }
+        if connecting.replace(true) {
+            return;
+        }
+        let app = app.clone();
+        let hold = app.hold();
+        let connecting = connecting.clone();
+        glib::spawn_future_local(async move {
+            let connection = gio::spawn_blocking(connect_to_daemon)
+                .await
+                .map_err(|_| "daemon connection task failed".to_owned())
+                .and_then(|connection| connection.map_err(|e| e.to_string()));
+            connecting.set(false);
+            match connection {
+                Ok((reader, writer)) => build_ui(&app, reader, writer),
+                Err(error) => {
+                    log::error!("could not start daemon: {error}");
+                    let dialog = gtk::MessageDialog::builder()
+                        .application(&app)
+                        .message_type(gtk::MessageType::Error)
+                        .buttons(gtk::ButtonsType::Close)
+                        .text("Could not start Lan Mouse")
+                        .secondary_text(format!("The background service could not start: {error}. Check your configuration and try again."))
+                        .build();
+                    dialog.connect_response(move |_, _| app.quit());
+                    dialog.present();
+                }
+            }
+            drop(hold);
+        });
+    });
 
     let args: Vec<&'static str> = vec![];
     app.run_with_args(&args)
@@ -198,15 +233,15 @@ fn setup_menu(app: &adw::Application) {
     app.set_menubar(Some(&menu))
 }
 
-fn build_ui(app: &Application) {
-    // If a window already exists (re-activation), just present it
-    if let Some(window) = app.windows().first() {
-        window.present();
-        return;
-    }
-
+fn connect_to_daemon() -> Result<
+    (
+        lan_mouse_ipc::FrontendEventReader,
+        lan_mouse_ipc::FrontendRequestWriter,
+    ),
+    lan_mouse_ipc::ConnectionError,
+> {
     log::debug!("connecting to lan-mouse-socket");
-    let (mut frontend_rx, frontend_tx) = match lan_mouse_ipc::try_connect() {
+    Ok(match lan_mouse_ipc::try_connect() {
         Ok(conn) => conn,
         Err(e) => {
             log::warn!("could not connect to daemon ({e}), spawning a new one");
@@ -218,19 +253,17 @@ fn build_ui(app: &Application) {
             if !input_event::macos_permissions::Permissions::input_allowed() {
                 command.env(input_event::macos_permissions::INPUT_DISABLED_ENV, "1");
             }
-            if let Err(spawn_err) = command.spawn() {
-                log::error!("failed to spawn daemon: {spawn_err}");
-                process::exit(1);
-            }
-            match lan_mouse_ipc::connect() {
-                Ok(conn) => conn,
-                Err(e) => {
-                    log::error!("{e}");
-                    process::exit(1);
-                }
-            }
+            command.spawn()?;
+            return lan_mouse_ipc::connect_timeout(Duration::from_secs(5));
         }
-    };
+    })
+}
+
+fn build_ui(
+    app: &Application,
+    mut frontend_rx: lan_mouse_ipc::FrontendEventReader,
+    frontend_tx: lan_mouse_ipc::FrontendRequestWriter,
+) {
     log::debug!("connected to lan-mouse-socket");
 
     let (sender, receiver) = async_channel::bounded(10);

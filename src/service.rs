@@ -40,6 +40,7 @@ pub struct Service {
     /// configuration
     config: Config,
     clipboard: Option<Clipboard>,
+    clipboard_error: Option<String>,
     /// input capture
     capture: Capture,
     /// input emulation
@@ -93,8 +94,16 @@ impl Service {
         let frontend_listener = AsyncFrontendListener::new().await?;
 
         let authorized_keys = Arc::new(RwLock::new(config.authorized_fingerprints()));
-        let clipboard =
-            Clipboard::start(config.clipboard(), cert.clone(), authorized_keys.clone()).await?;
+        let (clipboard, clipboard_error) =
+            match Clipboard::start(config.clipboard(), cert.clone(), authorized_keys.clone()).await
+            {
+                Ok(clipboard) => (clipboard, None),
+                Err(e) => {
+                    let message = format!("Clipboard disabled: {e}");
+                    log::error!("{message}");
+                    (None, Some(message))
+                }
+            };
         // listener + connection
         let listener =
             LanMouseListener::new(config.port(), cert.clone(), authorized_keys.clone()).await?;
@@ -117,6 +126,7 @@ impl Service {
         let service = Self {
             config,
             clipboard,
+            clipboard_error,
             capture,
             emulation,
             frontend_listener,
@@ -161,17 +171,30 @@ impl Service {
                     // Close the old session before applying changed pairing or
                     // permissions. A reload never keeps an old authorization alive.
                     if let Some(clipboard) = self.clipboard.take() { clipboard.stop().await; }
+                    self.clipboard_error = None;
                     if let Err(e) = result {
-                        log::error!("Clipboard disabled: configuration watcher failed: {e}");
+                        let message = format!("Clipboard disabled: configuration watcher failed: {e}");
+                        log::error!("{message}");
+                        self.clipboard_error = Some(message);
+                        self.sync_frontend();
                         continue;
                     }
                     match crypto::load_certificate(self.config.cert_path()) {
                         Ok(cert) => match Clipboard::start(self.config.clipboard(), cert, self.authorized_keys.clone()).await {
                             Ok(clipboard) => self.clipboard = clipboard,
-                            Err(e) => log::error!("Clipboard disabled after configuration change: {e}"),
+                            Err(e) => {
+                                let message = format!("Clipboard disabled after configuration change: {e}");
+                                log::error!("{message}");
+                                self.clipboard_error = Some(message);
+                            },
                         },
-                        Err(e) => log::error!("Clipboard disabled: certificate reload failed: {e}"),
+                        Err(e) => {
+                            let message = format!("Clipboard disabled: certificate reload failed: {e}");
+                            log::error!("{message}");
+                            self.clipboard_error = Some(message);
+                        },
                     }
+                    self.sync_frontend();
                 },
                 r = signal::ctrl_c() => break r.expect("failed to wait for CTRL+C"),
             }
@@ -292,7 +315,6 @@ impl Service {
             .write()
             .unwrap()
             .clone_from(&authorized_keys);
-        self.sync_frontend();
     }
 
     async fn handle_frontend_pending(&mut self) {
@@ -425,6 +447,9 @@ impl Service {
         ));
         let keys = self.authorized_keys.read().expect("lock").clone();
         self.notify_frontend(FrontendEvent::AuthorizedUpdated(keys));
+        if let Some(error) = self.clipboard_error.clone() {
+            self.notify_frontend(FrontendEvent::Error(error));
+        }
     }
 
     const ENTER_HANDLE_BEGIN: u64 = u64::MAX / 2 + 1;
